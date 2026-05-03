@@ -1,10 +1,7 @@
-// @ts-nocheck
-// Universal team shell — same shape as kernel-shell.
-// SCHEMA env var picks which DB schema's nodes to load (kernel/claude/groq/...).
-import fastify from 'fastify';
-import { Client } from 'pg';
-import { createRequire } from 'node:module';
-const require = createRequire(import.meta.url);
+// Universal team shell — plain JS, no TS compilation, no legacy.
+// SCHEMA env var picks which DB schema's nodes to load.
+const fastify = require('fastify');
+const { Client } = require('pg');
 
 async function main() {
   const dbUrl = process.env.DATABASE_URL;
@@ -15,7 +12,7 @@ async function main() {
   const helpers = {
     client,
     schema: SCHEMA,
-    async markStatus(name: string, status: string, errorText: string = '') {
+    async markStatus(name, status, errorText = '') {
       await client.query(
         `UPDATE ${SCHEMA}.nodes SET status=$1, last_loaded_at=now(), error_text=$2, load_count=load_count+1 WHERE name=$3`,
         [status, errorText, name]
@@ -29,13 +26,11 @@ async function main() {
   let res = await client.query(
     `SELECT code_text FROM ${SCHEMA}.nodes WHERE name='_shell_orchestrator' AND active=true AND (status='deployed' OR status='pending') ORDER BY version DESC LIMIT 1`
   );
-
   if (res.rowCount === 0) {
     res = await client.query(
       `SELECT code_text FROM ${SCHEMA}.nodes WHERE name='_shell_orchestrator' ORDER BY version DESC LIMIT 1`
     );
   }
-
   const code = res.rows[0]?.code_text;
   if (!code) throw new Error('No orchestrator code found in schema ' + SCHEMA);
 
@@ -49,7 +44,4 @@ async function main() {
   console.log('[shell] booted, schema=' + SCHEMA);
 }
 
-main().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+main().catch(err => { console.error(err); process.exit(1); });
