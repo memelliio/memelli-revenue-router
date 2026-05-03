@@ -1,53 +1,55 @@
-// memelli-revenue-router — Surface 4 control-surface microservice.
-// Owns: rb_build_specs, rb_products, rb_product_assets, rb_product_logins,
-//       rb_product_marketing, rb_product_jobs, rb_product_events.
-// Receives Build Specs (per .agent-sync/BUILD_SPEC_SCHEMA.md), validates, dispatches
-// WorkOrders to standalones (design / seo / etc.), receives /report/* callbacks,
-// surfaces read APIs.
-
-import Fastify from "fastify";
-import cors from "@fastify/cors";
-import pg from "pg";
-import { registerSpecRoutes } from "./routes/spec.js";
-import { registerProductRoutes } from "./routes/product.js";
-import { registerReportRoutes } from "./routes/report.js";
-
-const PORT = parseInt(process.env.PORT || "3000", 10);
-const DATABASE_URL = process.env.DATABASE_URL;
-if (!DATABASE_URL) {
-  console.error("DATABASE_URL env var required");
-  process.exit(1);
-}
-
-const pool = new pg.Pool({ connectionString: DATABASE_URL, max: 20 });
-const bootAt = new Date().toISOString();
-const SHA = process.env.RAILWAY_GIT_COMMIT_SHA || process.env.GIT_SHA || "unknown";
+// @ts-nocheck
+// Universal team shell — same shape as kernel-shell.
+// SCHEMA env var picks which DB schema's nodes to load (kernel/claude/groq/...).
+import fastify from 'fastify';
+import { Client } from 'pg';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
 
 async function main() {
-  const app = Fastify({ logger: { level: "info" } });
-  await app.register(cors, { origin: true, credentials: true });
+  const dbUrl = process.env.DATABASE_URL;
+  const SCHEMA = process.env.SCHEMA || 'kernel';
+  const client = new Client({ connectionString: dbUrl });
+  await client.connect();
 
-  app.get("/health", async () => ({
-    ok: true,
-    started_at: bootAt,
-    uptime: Math.round(process.uptime()),
-    sha: SHA,
-    repo: "memelliio/memelli-revenue-router",
-    module: "revenue-router",
-    env: process.env.NODE_ENV || "development",
-  }));
+  const helpers = {
+    client,
+    schema: SCHEMA,
+    async markStatus(name: string, status: string, errorText: string = '') {
+      await client.query(
+        `UPDATE ${SCHEMA}.nodes SET status=$1, last_loaded_at=now(), error_text=$2, load_count=load_count+1 WHERE name=$3`,
+        [status, errorText, name]
+      );
+    },
+  };
 
-  await app.register(async (sub) => {
-    registerSpecRoutes(sub, pool);
-    registerProductRoutes(sub, pool);
-    registerReportRoutes(sub, pool);
-  });
+  const app = fastify();
+  app.__schema = SCHEMA;
 
-  await app.listen({ port: PORT, host: "0.0.0.0" });
-  console.log(`memelli-revenue-router listening on :${PORT}`);
+  let res = await client.query(
+    `SELECT code_text FROM ${SCHEMA}.nodes WHERE name='_shell_orchestrator' AND active=true AND (status='deployed' OR status='pending') ORDER BY version DESC LIMIT 1`
+  );
+
+  if (res.rowCount === 0) {
+    res = await client.query(
+      `SELECT code_text FROM ${SCHEMA}.nodes WHERE name='_shell_orchestrator' ORDER BY version DESC LIMIT 1`
+    );
+  }
+
+  const code = res.rows[0]?.code_text;
+  if (!code) throw new Error('No orchestrator code found in schema ' + SCHEMA);
+
+  await helpers.markStatus('_shell_orchestrator', 'deploying');
+  const mod = { exports: {} };
+  const fn = new Function('module', 'exports', 'require', 'app', 'helpers', code);
+  fn(mod, mod.exports, require, app, helpers);
+  if (typeof mod.exports.register !== 'function') throw new Error('orchestrator did not export register');
+  await mod.exports.register(app, helpers);
+  await helpers.markStatus('_shell_orchestrator', 'deployed');
+  console.log('[shell] booted, schema=' + SCHEMA);
 }
 
-main().catch((err) => {
-  console.error("boot failed:", err);
+main().catch(err => {
+  console.error(err);
   process.exit(1);
 });
